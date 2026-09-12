@@ -1,41 +1,1680 @@
-Το project υλοποιεί την Προγραμματιστική Εργασία 3 στο μάθημα: Λειτουργικά Συστήματα.
+# Concurrent Bar Simulation in C
 
-Οδηγίες εκτέλεσης:
-1) make
-2) Τρέχεις είτε ./test είτε τα εξής: ./main, ./receptionist, ./visitor(όσες φορές χρειάζεται),
-    ./monitor(όσες φορές χρειάζεται), ./statistics
+**Operating Systems — Programming Assignment 3**
+**Winter Semester 2024**
 
-Με την εντολή "make clean" διαγράφονται τα αρχεία που δημιουργούνται με την main
+**Author:** Theodoros Feredinos
+**Language:** C
+**Platform:** Linux / POSIX
 
-Όλα τα αρχεία μπορούν να κληθούν με τα κατάλληλα flags, όπως ακριβώς ορίζει η εκφώνηση της εργασίας.
-Κατά την εκτέλεσης του αρχείο "main" δημιουργείται ένα αρχείο που περιέχει το κλειδί για το
-shared memory, ώστε όλα τα προγράμματα να μπορούνα να κληθούν χωρίς το flag "-s". Επίσης έχω επιλέξει
-τις εξής τιμές: 10 για το receptionist και 15 για το visitor, ώστε να μπορούν να κληθούν τα 
-αντίστοιχα προγράμματα.
+---
 
-Περιλαμβάνει τα εξής αρχεία κώδικα:
-~shared_memory.c: Περιλαμβάνει τις συναρτήσεις που διαχειρίζονται το shared_memory.
-                  Οι δηλώσεις των συναρτήσεων βρίσκονται στο shared_memory.h.
+## Overview
 
-~main.c: Δημιουργεί και αρχικοποιεί το shared memory χρησιμοποιοώντας τις συναρτήσεις
-         του shared_memory.c.
+This project implements a concurrent bar simulation using multiple UNIX processes, System V shared memory, and POSIX semaphores.
 
-~receptionist.c: Προσωμοιώνει την λειτουργία του υπεύθυνου του μπαρ. Οι δηλώσεις των 
-                 συναρτήσεων βρίσκονται στο receptionist.h.
+The simulation models the operation of a bar with a limited number of tables and chairs. Multiple visitor processes can enter the bar concurrently, wait for an available chair, sit at a table, place an order, remain in the bar for a random amount of time, and eventually leave.
 
-~visitor.c: Προσωμοιώνει την λειτουργία του επισκέπτη του μπαρ. Οι δηλώσεις των 
-                 συναρτήσεων βρίσκονται στο visitor.h.
+A separate receptionist process is responsible for serving visitors and recording their orders. A monitor process can be used to inspect the current state of the bar while the simulation is running. At the end of the simulation, a statistics process terminates the remaining processes, calculates the final statistics, displays the results, and cleans up the shared resources.
 
-~monitor.c: Εκτυπώνει την τρέχουσα κατάσταση του bar και τα στατιστικά για τα προϊόντα.
-            Οι δηλώσεις των συναρτήσεων βρίσκονται στο monitor.h.
+The main purpose of the project is to demonstrate practical concepts of process management, inter-process communication, shared memory, synchronization, and resource management in a UNIX environment.
 
-~statistics.c: Με την κλήση του, τερματίζει όλες τις ενεργές διεργασίες. Έπειτα εκτυπώνει
-               κάποια ζητούμενα από την εκφώνηση στατιστικά(αριθμό επισκεπτών, μέσο χρονικό 
-               διάστημα παραμονής, μέσος όρος αναμονής που χρειάστηκε για να βρούν οι πελάτες 
-               καρέκλα, συνολικά στατιστικά των προϊόντων). Στο τέλος απελευθερώνει την μνήμη, 
-               το shared memory και τους σεμαφόρους. Οι δηλώσεις των συναρτήσεων βρίσκονται 
-               στο statistics.h.
+The project uses:
 
-~test.c: Είναι το αρχείο που τεστάρει την ορθότητα της υλοποίησης.
+* C
+* UNIX processes
+* `fork()` and `execvp()`
+* System V shared memory
+* POSIX semaphores
+* UNIX signals
+* GCC
+* GNU Make
 
-H υλοποίηση μου ανταποκρίνεται σε όλα τα ζητούμενα της εργασίας.
+---
+
+# System Architecture
+
+The application is divided into several independent programs that cooperate through a common shared-memory segment.
+
+```text
+                           +----------------+
+                           |      main      |
+                           |                |
+                           | Shared memory  |
+                           | initialization |
+                           +-------+--------+
+                                   |
+                                   |
+                                   v
+                    +-----------------------------+
+                    |        Shared Bar           |
+                    |                             |
+                    |  Tables                     |
+                    |  Visitors                   |
+                    |  Orders                     |
+                    |  Statistics                 |
+                    |  Process IDs                |
+                    |  Semaphores                 |
+                    +----+-----------+---------+---+
+                         |           |         |
+                         |           |         |
+                         v           v         v
+                    +---------+ +----------+ +---------+
+                    | visitor | |receptionist| | monitor |
+                    +---------+ +----------+ +---------+
+                         |
+                         |
+                         v
+                    +-------------+
+                    |  statistics |
+                    +-------------+
+```
+
+All processes use the same `Bar` structure stored in shared memory.
+
+The processes have different responsibilities, but they must coordinate whenever they access data that can be modified concurrently.
+
+---
+
+# Simulation Model
+
+The simulated bar contains three tables, with four chairs at each table.
+
+```c
+#define MAX_VISITORS 12
+#define TABLES 3
+#define CHAIRS_PER_TABLE 4
+```
+
+Therefore, the maximum number of chairs available simultaneously is:
+
+```text
+3 tables × 4 chairs = 12 chairs
+```
+
+Each table maintains information about the visitors currently sitting there.
+
+A table stores:
+
+* The PIDs of visitors occupying its chairs
+* Its current occupancy
+* Whether it is full
+* Whether it has previously reached full capacity
+
+The general structure is:
+
+```text
+                    BAR
+
+       +-----------------------------+
+       |          Table 0            |
+       |  Chair 1  Chair 2  Chair 3 |
+       |  Chair 4                    |
+       +-----------------------------+
+
+       +-----------------------------+
+       |          Table 1            |
+       |  Chair 1  Chair 2  Chair 3 |
+       |  Chair 4                    |
+       +-----------------------------+
+
+       +-----------------------------+
+       |          Table 2            |
+       |  Chair 1  Chair 2  Chair 3 |
+       |  Chair 4                    |
+       +-----------------------------+
+
+                  12 chairs
+```
+
+Visitors therefore compete for a finite shared resource.
+
+This is one of the main reasons synchronization is necessary.
+
+---
+
+# Program Components
+
+The project is divided into the following main components:
+
+```text
+main
+visitor
+receptionist
+monitor
+statistics
+test
+```
+
+Each executable is responsible for a different part of the simulation.
+
+---
+
+# Main Process
+
+The `main` program is responsible for initializing the environment required by the rest of the application.
+
+Its main responsibilities are:
+
+1. Generate the shared-memory key.
+2. Store the key in `bar_key.txt`.
+3. Create the shared-memory segment.
+4. Attach to the shared-memory segment.
+5. Initialize the `Bar` structure.
+6. Initialize the POSIX semaphores.
+7. Prepare the shared state for the other processes.
+
+The key is generated using:
+
+```c
+ftok("/tmp", 'A');
+```
+
+The generated key is stored in:
+
+```text
+bar_key.txt
+```
+
+This file allows the other executables to obtain the key required to attach to the same shared-memory segment.
+
+The `main` process therefore acts as the initialization point of the whole simulation.
+
+---
+
+# Visitor Process
+
+Every visitor is represented by a separate process.
+
+A visitor must acquire a chair before it can enter the main part of the simulation.
+
+The general visitor lifecycle is:
+
+```text
+Visitor arrives
+       |
+       v
+Wait for an available chair
+       |
+       v
+Search for a suitable table
+       |
+       v
+Take a chair
+       |
+       v
+Record PID and update occupancy
+       |
+       v
+Stay in the bar
+       |
+       v
+Leave the table
+       |
+       v
+Release the chair
+       |
+       v
+Update statistics
+```
+
+The visitor process measures the time it spends waiting for a chair.
+
+Once a chair becomes available, the visitor searches the available tables.
+
+The implementation uses a circular search strategy. Instead of always starting from the first table, the search can continue from a different position and wrap around when it reaches the last table.
+
+Conceptually:
+
+```text
+Table 0 → Table 1 → Table 2 → Table 0 → ...
+```
+
+This allows the visitor to search through the available tables without permanently favoring one table.
+
+---
+
+# Seating Visitors
+
+A visitor can only occupy a chair if the corresponding table has available capacity.
+
+When a visitor takes a chair, the program updates the shared table information.
+
+This includes:
+
+* Adding the visitor PID
+* Increasing table occupancy
+* Updating the table state
+* Detecting when the table becomes full
+
+If the table reaches:
+
+```text
+occupancy == CHAIRS_PER_TABLE
+```
+
+it is marked as full.
+
+The table information is protected by a semaphore so that two visitors cannot modify the same table simultaneously.
+
+---
+
+# Visitor Waiting Time
+
+Waiting time is measured from the moment a visitor arrives until it successfully obtains a chair.
+
+The waiting time is accumulated in shared memory and is later used by the statistics process.
+
+The average waiting time is calculated as:
+
+```text
+average waiting time =
+total waiting time / number of visitors
+```
+
+This provides a measure of how long visitors had to wait before entering the available seating area.
+
+---
+
+# Visitor Stay
+
+After obtaining a chair, the visitor remains in the bar for a randomly selected amount of time.
+
+The maximum stay duration is provided as a command-line argument.
+
+For example:
+
+```bash
+./visitor -d 15 -s <shared_memory_key>
+```
+
+means that the maximum visitor stay time is 15 seconds.
+
+The test program uses:
+
+```text
+15 seconds
+```
+
+as the default maximum visitor stay.
+
+After the stay is completed, the visitor leaves the table.
+
+---
+
+# Leaving the Bar
+
+When a visitor leaves, the corresponding table information must be updated.
+
+The program:
+
+1. Removes the visitor PID from the table.
+2. Decreases the table occupancy.
+3. Releases the chair.
+4. Updates the relevant statistics.
+5. Detaches from shared memory.
+6. Terminates the visitor process.
+
+The chair semaphore is incremented when the chair becomes available again.
+
+This allows another waiting visitor to use it.
+
+---
+
+# Receptionist Process
+
+The `receptionist` program represents the person responsible for serving visitors.
+
+The receptionist continuously examines the shared bar state and searches for visitors that need to be served.
+
+The receptionist:
+
+1. Searches for a visitor.
+2. Generates an order.
+3. Updates the corresponding order counters.
+4. Simulates the service time.
+5. Continues serving other visitors.
+
+The order data is stored in shared memory so that the monitor and statistics processes can access the same information.
+
+---
+
+# Orders
+
+The simulation includes four products.
+
+### Drinks
+
+* Water
+* Wine
+
+### Food
+
+* Cheese
+* Salad
+
+The shared `Bar` structure maintains counters for each product.
+
+For example:
+
+```text
+Water orders: 12
+Wine orders: 8
+Cheese orders: 9
+Salad orders: 11
+```
+
+The actual values depend on the random execution of the simulation.
+
+The receptionist uses the appropriate synchronization mechanism when updating these shared counters.
+
+---
+
+# Receptionist Service Time
+
+The receptionist has a configurable maximum service/order time.
+
+It can be provided using:
+
+```bash
+./receptionist -d 10 -s <shared_memory_key>
+```
+
+where:
+
+```text
+-d 10
+```
+
+sets the maximum service time to 10 seconds.
+
+The default test configuration uses:
+
+```text
+Maximum receptionist service time: 10 seconds
+```
+
+The service duration is randomly selected during execution.
+
+---
+
+# Monitor Process
+
+The `monitor` executable provides a snapshot of the current state of the simulation.
+
+It can be executed while visitors and the receptionist are still running.
+
+The monitor displays information such as:
+
+* Current table occupancy
+* Visitor PIDs
+* Product order counts
+
+An example output is conceptually:
+
+```text
+----- Table situation -----
+
+Table 0: 3/4
+Visitors of Table 0: 18231 18234 18237
+
+Table 1: 4/4
+Visitors of Table 1: 18232 18235 18238 18240
+
+Table 2: 1/4
+Visitors of Table 2: 18239
+
+
+----- Product stats -----
+
+Drinks:
+Number of water orders: X
+Number of wine orders: X
+
+Foods:
+Number of cheese orders: X
+Number of salad orders: X
+```
+
+The monitor does not control the simulation. Its purpose is to inspect the current state.
+
+---
+
+# Statistics Process
+
+The `statistics` executable is responsible for the final stage of the simulation.
+
+Its responsibilities include:
+
+1. Terminating active visitor processes.
+2. Terminating the receptionist.
+3. Calculating the final statistics.
+4. Displaying the results.
+5. Destroying the semaphores.
+6. Detaching from shared memory.
+7. Removing the shared-memory segment.
+
+The process termination mechanism uses UNIX signals.
+
+In particular, active processes can be terminated using:
+
+```c
+kill(pid, SIGTERM);
+```
+
+---
+
+# Final Statistics
+
+The statistics process calculates information collected during the simulation.
+
+## Total Number of Visitors
+
+The program records the number of visitors that participated in the simulation.
+
+```text
+Total visitors = N
+```
+
+---
+
+## Average Visit Duration
+
+The total duration of visitor stays is accumulated during the execution.
+
+The average is calculated as:
+
+```text
+average visit duration =
+total visit duration / total number of visitors
+```
+
+This gives an estimate of how long visitors remained in the bar.
+
+---
+
+## Average Waiting Time
+
+The total time spent waiting for a chair is also accumulated.
+
+The average waiting time is calculated as:
+
+```text
+average waiting time =
+total waiting time / total number of visitors
+```
+
+---
+
+## Product Statistics
+
+The final statistics also contain the total number of orders for each product:
+
+```text
+Water
+Wine
+Cheese
+Salad
+```
+
+These values are stored in the shared memory throughout the simulation and read by the statistics process at the end.
+
+---
+
+# Shared Memory
+
+The central data structure of the application is the `Bar` structure defined in:
+
+```text
+shared_memory.h
+```
+
+The structure contains all the information that must be shared between processes.
+
+The shared state includes:
+
+* Table information
+* Visitor PIDs
+* Number of visitors
+* Receptionist PID
+* Visit duration
+* Waiting time
+* Product order counters
+* Synchronization semaphores
+
+The table structure contains:
+
+```c
+pid_t visitors[CHAIRS_PER_TABLE];
+int occupancy;
+int is_full;
+int has_been_full;
+```
+
+The bar also stores process and statistics information.
+
+Conceptually:
+
+```text
+Bar
+ |
+ +-- Tables
+ |    |
+ |    +-- Table 0
+ |    +-- Table 1
+ |    +-- Table 2
+ |
+ +-- Visitor information
+ |
+ +-- Receptionist information
+ |
+ +-- Waiting time
+ |
+ +-- Visit duration
+ |
+ +-- Product statistics
+ |
+ +-- Semaphores
+```
+
+All participating processes attach to the same shared-memory segment and operate on this structure.
+
+---
+
+# Inter-Process Communication
+
+The project uses System V shared memory as its main IPC mechanism.
+
+The relevant system calls include:
+
+```c
+shmget()
+shmat()
+shmdt()
+shmctl()
+```
+
+The general process is:
+
+```text
+Create shared memory
+        |
+        v
+     shmget()
+        |
+        v
+     shmat()
+        |
+        v
+Access shared Bar
+        |
+        v
+     shmdt()
+        |
+        v
+Remove shared memory
+```
+
+Using shared memory allows processes to access the same data without explicitly sending messages between them.
+
+However, shared memory alone does not provide synchronization.
+
+For this reason, POSIX semaphores are used alongside it.
+
+---
+
+# Synchronization
+
+Multiple processes can access the shared `Bar` structure at the same time.
+
+For example, two visitors could theoretically attempt to take the same last available chair simultaneously.
+
+Without synchronization, both processes could observe the chair as available and attempt to occupy it.
+
+This could result in:
+
+* Incorrect occupancy
+* More visitors than available chairs
+* Lost updates
+* Inconsistent statistics
+* Race conditions
+
+The project therefore uses POSIX semaphores to protect shared resources.
+
+Three semaphores are used.
+
+---
+
+# `table_mutex`
+
+The `table_mutex` semaphore protects table-related operations.
+
+It is used when processes need to inspect or modify information such as:
+
+* Table occupancy
+* Visitor PIDs
+* Chair allocation
+* Visitor removal
+* Table state
+
+The general pattern is:
+
+```c
+sem_wait(&bar->table_mutex);
+
+/* access shared table data */
+
+sem_post(&bar->table_mutex);
+```
+
+This ensures that only one process at a time can execute the protected section.
+
+---
+
+# `chair_available`
+
+`chair_available` is a counting semaphore.
+
+It represents the number of chairs currently available in the bar.
+
+Since there are:
+
+```text
+3 tables × 4 chairs = 12 chairs
+```
+
+the semaphore is initialized to 12.
+
+When a visitor wants to sit:
+
+```c
+sem_wait(&bar->chair_available);
+```
+
+If no chair is available, the visitor waits.
+
+When a visitor leaves:
+
+```c
+sem_post(&bar->chair_available);
+```
+
+This signals that a chair has become available.
+
+This is a direct example of using a counting semaphore to control access to a finite resource.
+
+---
+
+# `receptionist_mutex`
+
+The `receptionist_mutex` semaphore protects shared statistics and receptionist-related operations.
+
+It prevents concurrent modifications to counters such as:
+
+```text
+Total visitors
+Water orders
+Wine orders
+Cheese orders
+Salad orders
+Waiting time
+Visit duration
+```
+
+The general pattern is:
+
+```c
+sem_wait(&bar->receptionist_mutex);
+
+/* update shared statistics */
+
+sem_post(&bar->receptionist_mutex);
+```
+
+---
+
+# Critical Sections
+
+The project contains several critical sections.
+
+## Table Allocation
+
+When a visitor searches for and occupies a chair, the table data must be protected.
+
+```text
+Visitor
+   |
+   v
+Acquire table_mutex
+   |
+   v
+Search tables
+   |
+   v
+Update occupancy
+   |
+   v
+Store visitor PID
+   |
+   v
+Release table_mutex
+```
+
+---
+
+## Statistics Updates
+
+When shared statistics are modified:
+
+```text
+Process
+   |
+   v
+Acquire receptionist_mutex
+   |
+   v
+Update counters
+   |
+   v
+Release receptionist_mutex
+```
+
+This prevents lost updates when several processes access the statistics.
+
+---
+
+# Process Creation
+
+The project includes a `test.c` program that automatically starts the required processes.
+
+The test program uses the standard UNIX process creation mechanism:
+
+```c
+fork()
+```
+
+followed by:
+
+```c
+execvp()
+```
+
+The basic model is:
+
+```text
+Parent process
+      |
+      +---- fork()
+              |
+              v
+         Child process
+              |
+              +---- execvp()
+                       |
+                       v
+                 New executable
+```
+
+This allows the test program to start the different executables as independent processes.
+
+---
+
+# Process Lifecycle
+
+A complete execution can be summarized as follows:
+
+```text
+                         START
+                           |
+                           v
+                         main
+                           |
+                           v
+                Create shared memory
+                           |
+                           v
+                  Initialize Bar
+                           |
+                           v
+                 Initialize semaphores
+                           |
+                           v
+                    Start receptionist
+                           |
+                           v
+                  Create visitor processes
+                           |
+              +------------+------------+
+              |            |            |
+              v            v            v
+           Visitor      Visitor      Visitor
+              |            |            |
+              v            v            v
+          Get chair     Get chair     Get chair
+              |            |            |
+              v            v            v
+           Stay         Stay         Stay
+              |            |            |
+              v            v            v
+           Leave        Leave        Leave
+              |            |            |
+              +------------+------------+
+                           |
+                           v
+                    Monitor execution
+                           |
+                           v
+                  Visitors finish
+                           |
+                           v
+                    Final monitor
+                           |
+                           v
+                     Statistics
+                           |
+                           v
+                Terminate processes
+                           |
+                           v
+                 Destroy semaphores
+                           |
+                           v
+                Remove shared memory
+                           |
+                           v
+                          END
+```
+
+---
+
+# Project Structure
+
+```text
+.
+├── main.c
+├── shared_memory.c
+├── shared_memory.h
+│
+├── visitor.c
+├── visitor.h
+│
+├── receptionist.c
+├── receptionist.h
+│
+├── monitor.c
+├── monitor.h
+│
+├── statistics.c
+├── statistics.h
+│
+├── test.c
+├── Makefile
+├── README.md
+│
+└── .vscode/
+    └── settings.json
+```
+
+---
+
+# File Descriptions
+
+## `main.c`
+
+Initializes the shared environment.
+
+Responsibilities include:
+
+* Creating the shared-memory key
+* Writing the key to `bar_key.txt`
+* Creating shared memory
+* Initializing the `Bar` structure
+* Initializing the semaphores
+
+---
+
+## `shared_memory.c`
+
+Contains the implementation of shared-memory management.
+
+It provides functionality for:
+
+* Creating the shared-memory segment
+* Attaching to shared memory
+* Detaching from shared memory
+* Destroying the shared-memory segment
+* Initializing the bar
+* Initializing and destroying semaphores
+
+Important functions include:
+
+```c
+init_bar_shared_memory()
+create_shared_memory()
+attach_shared_memory()
+detach_shared_memory()
+destroy_shared_memory()
+```
+
+---
+
+## `shared_memory.h`
+
+Contains the shared data structures, constants, and function declarations.
+
+It defines:
+
+* `Table`
+* `Bar`
+* Maximum visitor limits
+* Number of tables
+* Number of chairs
+* Semaphore members
+* Shared-memory functions
+
+This file is included by the different processes because they all need to work with the same shared data structure.
+
+---
+
+## `visitor.c`
+
+Implements the behavior of a visitor.
+
+Main responsibilities:
+
+* Finding an available chair
+* Selecting a table
+* Updating table occupancy
+* Recording the visitor PID
+* Measuring waiting time
+* Simulating the visitor's stay
+* Leaving the table
+* Updating statistics
+
+Important functions include:
+
+```c
+seat_visitor()
+find_chair()
+leave_table()
+bar_visit()
+```
+
+---
+
+## `receptionist.c`
+
+Implements the receptionist process.
+
+Responsibilities include:
+
+* Finding visitors
+* Generating orders
+* Updating product statistics
+* Simulating service time
+
+Important functions include:
+
+```c
+find_visitor()
+order()
+update_orders()
+serve_visitor()
+```
+
+---
+
+## `monitor.c`
+
+Displays the current state of the simulation.
+
+It reports:
+
+* Table occupancy
+* Visitor PIDs
+* Water orders
+* Wine orders
+* Cheese orders
+* Salad orders
+
+The monitor attaches to the shared-memory segment, reads the information, prints it, and detaches.
+
+---
+
+## `statistics.c`
+
+Handles the final stage of the simulation.
+
+It:
+
+* Identifies active processes
+* Sends termination signals
+* Calculates averages
+* Prints final statistics
+* Cleans up semaphores
+* Removes shared memory
+
+---
+
+## `test.c`
+
+Provides an automated test/integration scenario.
+
+It coordinates the complete simulation by starting the required executables and controlling the execution order.
+
+The test:
+
+1. Starts `main`.
+2. Reads the shared-memory key.
+3. Starts the receptionist.
+4. Creates visitors.
+5. Periodically runs the monitor.
+6. Waits for the visitors to finish.
+7. Runs a final monitor.
+8. Starts the statistics process.
+9. Performs final cleanup.
+
+The default configuration creates:
+
+```text
+10 visitors
+```
+
+with:
+
+```text
+Maximum visitor stay: 15 seconds
+Maximum receptionist service time: 10 seconds
+```
+
+---
+
+# Building
+
+The project includes a `Makefile` for compilation.
+
+A complete build can be performed using:
+
+```bash
+make
+```
+
+The compiler used is GCC.
+
+The compilation flags include:
+
+```text
+-Wall
+-g
+-pthread
+```
+
+`-Wall` enables a broad set of compiler warnings.
+
+`-g` includes debugging information.
+
+`-pthread` enables the required POSIX threading/semaphore support.
+
+---
+
+# Running the Project
+
+The simplest way to execute the complete simulation is through the test program.
+
+First compile the project:
+
+```bash
+make
+```
+
+Then run:
+
+```bash
+./test
+```
+
+The test program automatically starts the required processes and coordinates the simulation.
+
+---
+
+# Automated Test Configuration
+
+The default test scenario uses the following values:
+
+| Parameter                         |      Value |
+| --------------------------------- | ---------: |
+| Number of tables                  |          3 |
+| Chairs per table                  |          4 |
+| Total chairs                      |         12 |
+| Number of visitors                |         10 |
+| Maximum visitor stay              | 15 seconds |
+| Maximum receptionist service time | 10 seconds |
+
+The visitors are created during the execution of the test rather than all being treated as one single operation.
+
+The monitor is also executed periodically so that the state of the tables and the orders can be observed while the simulation is running.
+
+---
+
+# Manual Execution
+
+The individual components can also be executed separately.
+
+The first step is to initialize the shared memory:
+
+```bash
+./main
+```
+
+This creates the shared-memory segment and generates:
+
+```text
+bar_key.txt
+```
+
+The receptionist can then be started with:
+
+```bash
+./receptionist
+```
+
+or by explicitly specifying its parameters:
+
+```bash
+./receptionist -d 10 -s <shared_memory_key>
+```
+
+Visitors can be started using:
+
+```bash
+./visitor
+```
+
+or:
+
+```bash
+./visitor -d 15 -s <shared_memory_key>
+```
+
+The current state can be inspected using:
+
+```bash
+./monitor -s <shared_memory_key>
+```
+
+Finally, the simulation can be terminated and the final statistics displayed with:
+
+```bash
+./statistics -s <shared_memory_key>
+```
+
+---
+
+# Command-Line Arguments
+
+## Visitor
+
+The visitor program accepts:
+
+```text
+-d <time>
+```
+
+Maximum visitor stay time.
+
+```text
+-s <key>
+```
+
+Shared-memory key.
+
+Example:
+
+```bash
+./visitor -d 15 -s 12345678
+```
+
+---
+
+## Receptionist
+
+The receptionist accepts:
+
+```text
+-d <time>
+```
+
+Maximum order/service time.
+
+```text
+-s <key>
+```
+
+Shared-memory key.
+
+Example:
+
+```bash
+./receptionist -d 10 -s 12345678
+```
+
+---
+
+## Monitor
+
+The monitor accepts:
+
+```text
+-s <key>
+```
+
+Shared-memory key.
+
+Example:
+
+```bash
+./monitor -s 12345678
+```
+
+---
+
+## Statistics
+
+The statistics process accepts:
+
+```text
+-s <key>
+```
+
+Shared-memory key.
+
+Example:
+
+```bash
+./statistics -s 12345678
+```
+
+---
+
+# Cleaning the Project
+
+The project provides a `clean` target in the `Makefile`.
+
+Run:
+
+```bash
+make clean
+```
+
+This removes the generated executables, object files, and generated shared-memory key file.
+
+Typical generated files include:
+
+```text
+main
+visitor
+receptionist
+monitor
+statistics
+test
+shared_memory.o
+bar_key.txt
+```
+
+---
+
+# Resource Management
+
+Correct cleanup is an important part of the implementation.
+
+The project creates operating-system resources that must be explicitly released when the simulation ends.
+
+The resource lifecycle is approximately:
+
+```text
+Creation
+   |
+   +-- shmget()
+   +-- shmat()
+   +-- sem_init()
+   |
+   v
+Usage
+   |
+   +-- Shared memory
+   +-- Semaphores
+   +-- Multiple processes
+   |
+   v
+Cleanup
+   |
+   +-- Terminate processes
+   +-- sem_destroy()
+   +-- shmdt()
+   +-- shmctl(..., IPC_RMID, ...)
+```
+
+If shared-memory segments are not removed correctly, they can remain allocated by the operating system after the program terminates.
+
+The statistics process is therefore responsible for the final cleanup stage.
+
+---
+
+# Operating System Concepts
+
+This project combines several important Operating Systems concepts into a single application.
+
+## Processes
+
+The simulation uses multiple independent processes instead of implementing all roles inside one process.
+
+The main executable components are:
+
+```text
+main
+visitor
+receptionist
+monitor
+statistics
+```
+
+---
+
+## Inter-Process Communication
+
+The processes communicate through shared memory.
+
+This allows them to access common state such as:
+
+* Table occupancy
+* Visitor PIDs
+* Orders
+* Statistics
+
+---
+
+## Shared Memory
+
+System V shared memory is used as the main IPC mechanism.
+
+The relevant functions are:
+
+```c
+shmget()
+shmat()
+shmdt()
+shmctl()
+```
+
+---
+
+## Synchronization
+
+POSIX semaphores are used to coordinate concurrent processes.
+
+The relevant operations are:
+
+```c
+sem_init()
+sem_wait()
+sem_post()
+sem_destroy()
+```
+
+---
+
+## Mutual Exclusion
+
+Mutex-like semaphores are used to protect critical sections.
+
+This is particularly important when multiple visitors attempt to access the same table or when shared statistics are updated.
+
+---
+
+## Counting Semaphores
+
+The `chair_available` semaphore demonstrates how a counting semaphore can represent a limited resource.
+
+The initial value corresponds to the total number of chairs.
+
+Each visitor decrements the value when acquiring a chair and increments it when releasing the chair.
+
+---
+
+## Race Conditions
+
+Without synchronization, two processes could simultaneously modify the same shared data.
+
+For example, if only one chair is available:
+
+```text
+Visitor A → sees 1 chair
+Visitor B → sees 1 chair
+Visitor A → takes chair
+Visitor B → takes chair
+```
+
+Without proper synchronization, both processes could incorrectly believe that the chair was available.
+
+The semaphore mechanism prevents this situation.
+
+---
+
+## Signals
+
+UNIX signals are used to control process termination.
+
+The statistics process can send:
+
+```c
+SIGTERM
+```
+
+to active processes using:
+
+```c
+kill()
+```
+
+This provides a controlled way of ending the remaining processes when the simulation is complete.
+
+---
+
+# Testing and Concurrency
+
+Testing this application differs from testing a simple sequential program.
+
+The behavior depends on the interaction between several processes and on the timing of their execution.
+
+For example, the following processes may be active at the same time:
+
+```text
+Visitor 1
+Visitor 2
+Visitor 3
+Visitor 4
+Receptionist
+Monitor
+```
+
+All of them may access the same shared-memory segment.
+
+The test program therefore acts primarily as an integration test. It checks that the individual programs work together and that shared-memory and synchronization mechanisms behave correctly under concurrent execution.
+
+Because random delays are used, different executions may produce different order counts, waiting times, and visit durations.
+
+---
+
+# Randomized Behaviour
+
+The simulation includes random timing and order generation.
+
+This means that two executions of the same test can produce different results.
+
+For example:
+
+```text
+Run 1:
+Water: 6
+Wine: 4
+Cheese: 7
+Salad: 3
+
+Run 2:
+Water: 5
+Wine: 5
+Cheese: 4
+Salad: 6
+```
+
+The exact results depend on the scheduling of the processes and the generated random values.
+
+This is expected behavior in a concurrent simulation.
+
+---
+
+# Design Considerations
+
+A central design requirement of the project is that all processes operate on a consistent representation of the bar.
+
+Instead of maintaining independent copies of the state, the application stores the main state in shared memory.
+
+This means that:
+
+```text
+visitor
+   |
+   +----+
+        |
+receptionist ----> Shared Bar <---- monitor
+        |
+        +----+
+             |
+         statistics
+```
+
+All processes see the same tables, visitors, orders, and statistics.
+
+The semaphores provide the synchronization required to safely modify this common state.
+
+---
+
+# Limitations
+
+The project is designed as an academic Operating Systems exercise and focuses primarily on process synchronization and IPC.
+
+It is not intended to be a production-ready restaurant or queue-management system.
+
+The simulation uses a fixed number of tables and chairs, and the behavior of visitors and orders is intentionally randomized.
+
+The command-line interface is also designed around the requirements of the assignment rather than around a general-purpose configuration system.
+
+---
+
+# Development Environment
+
+The project is intended for a Linux/POSIX environment.
+
+It relies on operating-system facilities such as:
+
+* System V IPC
+* POSIX semaphores
+* UNIX signals
+* `fork()`
+* `execvp()`
+* Process IDs
+* UNIX system calls
+
+For this reason, Linux is the recommended environment for compiling and running the project.
+
+The repository also contains a `.vscode` directory with configuration used during development.
+
+---
+
+# Learning Objectives
+
+The implementation covers the following practical topics:
+
+1. Creating and managing UNIX processes.
+2. Using `fork()` and `execvp()`.
+3. Implementing inter-process communication.
+4. Creating and attaching to shared memory.
+5. Managing System V IPC resources.
+6. Using POSIX semaphores.
+7. Implementing mutual exclusion.
+8. Using counting semaphores.
+9. Protecting critical sections.
+10. Preventing race conditions.
+11. Sharing data between independent processes.
+12. Handling process termination with UNIX signals.
+13. Collecting runtime statistics.
+14. Cleaning up operating-system resources.
+15. Building a multi-file C project using GNU Make.
+
+---
+
+# Summary
+
+The project implements a multi-process bar simulation in C using shared memory and POSIX semaphores.
+
+The main components have separate responsibilities:
+
+```text
+main
+    Initializes the shared environment.
+
+visitor
+    Represents customers entering, using, and leaving the bar.
+
+receptionist
+    Handles visitor orders and updates order statistics.
+
+monitor
+    Displays the current state of the simulation.
+
+statistics
+    Terminates the simulation, calculates final statistics,
+    and cleans up the shared resources.
+
+test
+    Coordinates the complete simulation automatically.
+```
+
+The project demonstrates how multiple independent UNIX processes can cooperate while accessing a common data structure.
+
+The combination of shared memory and semaphores allows the application to model a realistic concurrent environment in which several processes compete for limited resources while maintaining a consistent shared state.
+
+---
+
+# Technologies
+
+```text
+C
+Linux / UNIX
+System V Shared Memory
+POSIX Semaphores
+UNIX Signals
+fork()
+execvp()
+GCC
+GNU Make
+```
+
+---
+
+# Author
+
+**Theodoros Feredinos**
+
+University of Athens
+Department of Informatics and Telecommunications
+
+---
+
+# Course
+
+**Operating Systems**
+
+**Programming Assignment 3 — Winter Semester 2024**
+
+This repository contains the implementation developed for the third programming assignment of the Operating Systems course.
