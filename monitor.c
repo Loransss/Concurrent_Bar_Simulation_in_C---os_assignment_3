@@ -6,81 +6,85 @@
 #include <sys/shm.h>
 #include "shared_memory.h"
 
-// Print table occupancy and visitor details
-void print_table_status(BarSharedMemory* shm) {
-    for (int i = 0; i < MAX_TABLES; ++i) {
-        printf("Table %d Occupancy: %d/%d\n", i, shm->tables[i].occupancy, CHAIRS_PER_TABLE);
-        printf("  Visitors: ");
-        for (int j = 0; j < CHAIRS_PER_TABLE; ++j) {
-            if (shm->tables[i].visitors[j] != 0) {
-                printf("%d ", shm->tables[i].visitors[j]);
+//Fuction that dispalys the bar monitor
+void display_bar(Bar* shm) {
+    printf("Monitor of the bar\n\n");
+
+    //Print the situation in the tables
+    printf("----- Table situation -----\n");
+    for (int i=0; i < TABLES; ++i){
+        int table_occupancy =  shm->tables[i].occupancy;
+        printf("\nTable %d: %d/%d\n", i, table_occupancy, CHAIRS_PER_TABLE);
+        printf("  ~Visitors of Table %d: ", i);
+        for (int j=0; j<CHAIRS_PER_TABLE; ++j) {
+            int table_visitor = shm->tables[i].visitors[j];
+            if (table_visitor != 0) {
+                printf("%d ", table_visitor);
             }
         }
         printf("\n");
     }
-}
 
-// Print consumption statistics
-void print_product_stats(BarSharedMemory* shm) {
-    printf("\nConsumption Statistics:\n");
+    //Print the product statistics
+    printf("\n-----Product stats-----\n");
 
-    // Print drinks statistics
     printf("Drinks:\n");
-    printf("  Water Orders: %d\n", shm->total_water_orders);
-    printf("  Wine Orders: %d\n", shm->total_wine_orders);
+    int water = shm->water_orders;
+    int wine = shm->wine_orders;
+    printf("Number of water orders: %d\n", water);
+    printf("Number of wine orders: %d\n", wine);
 
     // Print food statistics
-    printf("Foods:\n");
-    printf("  Cheese Orders: %d\n", shm->total_cheese_orders);
-    printf("  Salad Orders: %d\n", shm->total_salad_orders);
+    printf("\nFoods:\n");
+    int cheese = shm->cheese_orders;
+    int salad = shm->salad_orders;
+    printf("Number of cheese orders: %d\n", cheese);
+    printf("Number of salad orders: %d\n", salad);
 }
 
-// Display the entire bar status
-void display_bar_status(BarSharedMemory* shm) {
-    printf("Bar Status Monitor\n");
-    printf("-------------------\n");
+//Parse the command line arguments
+void parse_arguments(int argc, char* argv[], key_t* shmkey) {
+    // Try to read key from file first
+    FILE *key_file = fopen("bar_key.txt", "r");
+    if (key_file) {
+        fscanf(key_file, "%d", shmkey);
+        fclose(key_file);
+    }
 
-    print_table_status(shm);
-    print_product_stats(shm);
+    if(argc == 3 && strcmp(argv[1], "-s") == 0) {
+        if (sscanf(argv[2], "%d", shmkey) != 1) {
+            fprintf(stderr, "Error: Invalid shared memory key format.\n");
+            exit(EXIT_FAILURE);
+        }
+    }else if (argc != 1) {
+        fprintf(stderr, "Error in program call.\n");
+        exit(EXIT_FAILURE);
+    }
 }
+
 
 int main(int argc, char* argv[]) {
-    int opt;
-    key_t shmkey = 1108402178;  // Default shared memory key
+    key_t shmkey;
 
-    // Parse command-line arguments
-    while ((opt = getopt(argc, argv, "s:")) != -1) {
-        switch (opt) {
-            case 's':
-                shmkey = atoi(optarg);
-                break;
-            default:
-                fprintf(stderr, "Usage: %s [-s shmkey]\n", argv[0]);
-                return 1;
-        }
-    }
+    parse_arguments(argc, argv, &shmkey);
 
-    // Attach to existing shared memory
-    int shmid = shmget(shmkey, sizeof(BarSharedMemory), 0666);
+    //Attach the shared memory
+
+    //Get shared memory segment
+    int shmid = shmget(shmkey, sizeof(Bar), 0666);
     if (shmid == -1) {
-        perror("Failed to get shared memory");
+        fprintf(stderr, "Get shared memory segment failure!\n");
         return 1;
     }
 
-    BarSharedMemory* shm = (BarSharedMemory*)shmat(shmid, NULL, 0);
-    if (shm == (void*)-1) {
-        perror("Failed to attach shared memory");
-        return 1;
-    }
+    //Attach shared memory
+    Bar* shm = attach_shared_memory(shmid);
 
-    // Display the bar status
-    display_bar_status(shm);
+    //Display the bar status
+    display_bar(shm);
 
-    // Detach shared memory
-    if (shmdt(shm) == -1) {
-        perror("Failed to detach shared memory");
-        return 1;
-    }
+    //Detach the shared memory
+    detach_shared_memory(shm);
 
     return 0;
 }

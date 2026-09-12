@@ -1,138 +1,157 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <unistd.h>
 #include <sys/ipc.h>
+#include <string.h>
 #include <sys/shm.h>
 #include <time.h>
 #include "shared_memory.h"
 
-// Processes an order for a visitor
-void process_order(BarSharedMemory* shm, pid_t visitor_pid) {
-    // Randomly decide on drinks and food
-    bool water = rand() % 2;
-    bool wine = rand() % 2;
-    bool cheese = rand() % 2;
-    bool salad = rand() % 2;
 
-    // At least one drink is mandatory
-    if (!water && !wine) {
-        water = true;
+//Function to update the species orders
+void update_orders(Bar* shm, int water, int wine, int cheese, int salad){
+    if(water){
+        printf("Visitor ordered water.\n");
+        shm->water_orders++;
     }
+    if(wine){
+        printf("Visitor ordered wine.\n");
+        shm->wine_orders++;
+    }
+    if(cheese){
+        printf("Visitor ordered cheese.\n");
+        shm->cheese_orders++;
+    }
+    if(salad){
+        printf("Visitor ordered salad.\n");
+        shm->salad_orders++;
+    }
+}
 
-    printf("Processing order for visitor %d\n", visitor_pid);
+//Order procces
+void order(pid_t visitor_pid, Bar* shm) {
+    //Randoms chose food and drink
+    srand(time(NULL));
+    int water = rand() % 2;
+    int wine = rand() % 2;
+    int cheese = rand() % 2;
+    int salad = rand() % 2;
+
+    //everyone has to take at least one drink
+    if (!water && !wine) {
+        if(rand()%2){
+            water = 1;
+        }
+        else{
+            wine = 1;
+        }
+    }
 
     sem_wait(&shm->receptionist_mutex);
 
-    // Update drink orders
-    if (water) {
-        shm->total_water_orders++;
-        printf("Water ordered\n");
-    }
-    if (wine) {
-        shm->total_wine_orders++;
-        printf("Wine ordered\n");
-    }
-
-    // Update food orders
-    if (cheese) {
-        shm->total_cheese_orders++;
-        printf("Cheese ordered\n");
-    }
-    if (salad) {
-        shm->total_salad_orders++;
-        printf("Salad ordered\n");
-    }
+    //Update the species orders
+    update_orders(shm, water, wine, cheese, salad);
 
     sem_post(&shm->receptionist_mutex);
 }
 
-// Serves a visitor from the shared memory bar
-void serve_visitor(BarSharedMemory* shm, int max_order_time) {
-    // Find a visitor that needs service
-    bool visitor_found = false;
-    pid_t visitor_pid = 0;
-
+//Function to find a visitor that needs service
+pid_t find_visitor(Bar* shm) {
     sem_wait(&shm->table_mutex);
-    
+
     // Check all tables for visitors
-    for (int i = 0; i < MAX_TABLES; ++i) {
-        for (int j = 0; j < CHAIRS_PER_TABLE; ++j) {
-            if (shm->tables[i].visitors[j] != 0) {
-                visitor_pid = shm->tables[i].visitors[j];
-                visitor_found = true;
-                break;
+    for (int i=0; i<TABLES; ++i) {
+        for (int j=0; j<CHAIRS_PER_TABLE; ++j) {
+            int visitor_to_serve = shm->tables[i].visitors[j];
+            if (visitor_to_serve != 0) {;
+                sem_post(&shm->table_mutex);
+                return visitor_to_serve; //Visitor found
             }
         }
-        if (visitor_found) break;
     }
-    
+
     sem_post(&shm->table_mutex);
+    return 0; //No visitor found
+}
 
-    if (visitor_found) {
-        // Service time is random between 0.5 * max_order_time and max_order_time
-        int service_time = (rand() % (max_order_time / 2)) + (max_order_time / 2);
+// Function to serve a visitor
+void serve_visitor(Bar* shm, int max_order_time) {
+    //Find a visitor that needs service
+    pid_t visitor_to_serve = find_visitor(shm);
 
-        // Process order for the found visitor
-        process_order(shm, visitor_pid);
+    if(visitor_to_serve != 0){
+        //Service time is random between 0.5 * max_order_time and max_order_time
+        srand(time(NULL));
+        double min_order_time = 0.5 * max_order_time; //Minimum service time
+        double service_time = min_order_time + ((double)rand() / RAND_MAX) * (max_order_time - min_order_time);
 
-        // Simulate service time
+        //Process order for the found visitor
+        order(visitor_to_serve, shm);
+
+        //Sleep for the service time
         sleep(service_time);
-    } else {
-        // No visitors to serve, wait a bit
-        usleep(100000); // Sleep for 0.1 seconds
+    }else {
+        //No visitor to serve so we wait
+        usleep(100000);
     }
 }
 
-int main(int argc, char* argv[]) {
-    int opt;
-    int order_time = 10;  // Default order time
-    key_t shmkey = 1108402178;  // Default shared memory key
+//Parse the command line arguments
+void parse_arguments(int argc, char* argv[], int* order_time, key_t* shmkey) {
+    if (argc < 2) {
+        printf("Using default settings: order_time=%d, shmkey=%d\n", *order_time, *shmkey);
+        return;
+    }
 
-    // Parse command line arguments
-    while ((opt = getopt(argc, argv, "d:s:")) != -1) {
-        switch (opt) {
-            case 'd':
-                order_time = atoi(optarg);
-                break;
-            case 's':
-                shmkey = atoi(optarg);
-                break;
-            default:
-                fprintf(stderr, "Usage: %s [-d order_time] [-s shmkey]\n", argv[0]);
-                return 1;
+    // Try to read key from file first
+    FILE *key_file = fopen("bar_key.txt", "r");
+    if (key_file) {
+        fscanf(key_file, "%d", shmkey);
+        fclose(key_file);
+    }
+
+    for (int i=1; i<argc; ++i) {
+        if (strcmp(argv[i], "-d") == 0 && (i + 1) < argc) {
+            *order_time = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-s") == 0 && (i + 1) < argc) {
+            *shmkey = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Invalid argument passing.\n");
+            exit(EXIT_FAILURE);
         }
     }
+}
 
-    printf("Receptionist starting with order time: %d\n", order_time);
 
-    // Attach to existing shared memory
-    int shmid = shmget(shmkey, sizeof(BarSharedMemory), 0666);
+int main(int argc, char* argv[]) {
+    int order_time = 10;  //Default order time
+    key_t shmkey; 
+
+    parse_arguments(argc, argv, &order_time, &shmkey);
+
+    printf("\nReceptionist starting with order time: %d\n", order_time);
+
+    //Attach the shared memory
+
+    //Get shared memory segment
+    int shmid = shmget(shmkey, sizeof(Bar), 0666);
     if (shmid == -1) {
-        perror("Failed to get shared memory");
+        fprintf(stderr, "Get shared memory segment failure!\n");
         return 1;
     }
 
-    BarSharedMemory* shm = (BarSharedMemory*)shmat(shmid, NULL, 0);
-    if (shm == (void*)-1) {
-        perror("Failed to attach shared memory");
-        return 1;
-    }
+    //Attach shared memory
+    Bar* shm = attach_shared_memory(shmid);
 
-    srand(time(NULL));
+    shm->receptionist_pid = getpid();
 
-    printf("Receptionist ready to serve visitors\n");
-
-    // Main service loop
-    while (1) {
+    //Serve loop
+    while (1){
         serve_visitor(shm, order_time);
     }
 
-    // Detach shared memory (not reached in this infinite loop)
-    if (shmdt(shm) == -1) {
-        perror("Failed to detach shared memory");
-        return 1;
-    }
+    //Detach the shared memory
+    detach_shared_memory(shm);
 
     return 0;
 }

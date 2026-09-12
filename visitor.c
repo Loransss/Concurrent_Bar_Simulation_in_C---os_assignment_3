@@ -1,64 +1,102 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <string.h>
 #include "shared_memory.h"
 
-// Finds an available chair for the visitor
-void find_available_chair(BarSharedMemory* shm, pid_t pid) {
-    printf("Visitor %d looking for a chair...\n", pid);
+//Helper function to find and seat a visitor at a table
+int seat_visitor(Bar* shm, pid_t pid, int start_table) {
+    for (int i=0; i<TABLES; ++i) {
+        int current_table = (start_table + i) % TABLES; // Circular iteration
 
-    while (true) {
+        if (shm->tables[current_table].occupancy < CHAIRS_PER_TABLE && !shm->tables[current_table].has_been_full) {
+            //Add visitor to an available chair
+            for (int j = 0; j<CHAIRS_PER_TABLE; ++j) {
+                if (shm->tables[current_table].visitors[j] == 0) {
+                    shm->tables[current_table].visitors[j] = pid;
+                    shm->tables[current_table].occupancy++;
+
+                    printf("Visitor %d seated at table %d, chair %d\n", pid, current_table, j);
+
+                    // Update table state if fully occupied
+                    if (shm->tables[current_table].occupancy == CHAIRS_PER_TABLE) {
+                        shm->tables[current_table].is_full = 1;
+                        shm->tables[current_table].has_been_full = 1;
+                    }
+                    return (current_table + 1) % TABLES; //Return next starting point
+                }
+            }
+        }
+    }
+
+    return start_table; //If no chair found, return the same starting point
+}
+
+//Find a chair for the visitor
+void find_chair(pid_t pid, Bar* shm) {
+    static int last_checked_table = 0;
+
+    //Store visitor PID in shared memory for tracking
+    sem_wait(&shm->receptionist_mutex);
+    if (shm->num_of_visitors < MAX_VISITORS) {
+        shm->visitor_pid[shm->num_of_visitors++] = pid;
+    }
+    sem_post(&shm->receptionist_mutex);
+
+    struct timespec start_time, end_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);  //Start timing the wait
+
+    while (1) {
         sem_wait(&shm->chair_available);
         sem_wait(&shm->table_mutex);
 
-        bool found = false;
+        //Attempt to find and seat the visitor
+        int new_start_table = seat_visitor(shm, pid, last_checked_table);
 
-        // Find a table with space
-        for (int i = 0; i < MAX_TABLES; ++i) {
-            if (shm->tables[i].occupancy < CHAIRS_PER_TABLE) {
-                // Add visitor to table
-                for (int j = 0; j < CHAIRS_PER_TABLE; ++j) {
-                    if (shm->tables[i].visitors[j] == 0) {
-                        shm->tables[i].visitors[j] = pid;
-                        shm->tables[i].occupancy++;
+        sem_post(&shm->table_mutex);
 
-                        printf("Visitor %d sat at table %d, chair %d\n", pid, i, j);
+        if (new_start_table != last_checked_table) {
+            //Visitor was successfully seated
+            last_checked_table = new_start_table;
+            clock_gettime(CLOCK_MONOTONIC, &end_time);
+            double wait_time = (end_time.tv_sec - start_time.tv_sec) + 
+                             (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+            
+            //Update statistics atomically
+            sem_wait(&shm->receptionist_mutex);
+            shm->wait_time += wait_time;
+            shm->total_visitors++;
+            sem_post(&shm->receptionist_mutex);
 
-                        if (shm->tables[i].occupancy == CHAIRS_PER_TABLE) {
-                            shm->tables[i].is_full = true;
-                        }
-
-                        found = true;
-                        break;
-                    }
-                }
-                if (found) break;
-            }
+            last_checked_table = new_start_table;
+            sem_post(&shm->table_mutex);
+            return;
         }
 
         sem_post(&shm->table_mutex);
-        if (found) return;
-
         printf("Visitor %d waiting for available chair...\n", pid);
-        sleep(1); // Wait and retry
+        sleep(1); //Wait and try again
     }
 }
 
-// Leaves the table after resting
-void leave_table(BarSharedMemory* shm, pid_t pid) {
+//Leaves the table
+void leave_table(pid_t pid, Bar* shm) {
     sem_wait(&shm->table_mutex);
 
-    for (int i = 0; i < MAX_TABLES; ++i) {
-        for (int j = 0; j < CHAIRS_PER_TABLE; ++j) {
+    for (int i=0; i<TABLES; ++i) {
+        for (int j=0; j<CHAIRS_PER_TABLE; ++j) {
             if (shm->tables[i].visitors[j] == pid) {
                 shm->tables[i].visitors[j] = 0;
                 shm->tables[i].occupancy--;
-                shm->tables[i].is_full = false;
-
-                printf("Visitor %d leaving table %d, chair %d\n", pid, i, j);
+                shm->tables[i].is_full = 0;
+                //If the table gets empty, the visitor can sit
+                if(shm->tables[i].occupancy == 0){
+                    shm->tables[i].has_been_full = 0;
+                }
+                printf("Visitor %d leaving table %d\n", pid, i);
                 break;
             }
         }
@@ -68,64 +106,86 @@ void leave_table(BarSharedMemory* shm, pid_t pid) {
     sem_post(&shm->chair_available);
 }
 
-// Simulates a visit to the bar
-void visit_bar(BarSharedMemory* shm, int max_rest_time, pid_t pid) {
-    // Find an available chair
-    find_available_chair(shm, pid);
+//Function tha simualtes the bar visit
+void bar_visit(Bar* shm, int max_rest_time, pid_t pid) {
+    struct timespec start_time, end_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    
+    //Find an available chair
+    find_chair(pid, shm);
 
-    // Rest at the table
-    int rest_duration = (rand() % (max_rest_time / 2)) + (max_rest_time / 2);
-    printf("Visitor %d will stay for %d seconds\n", pid, rest_duration);
+    //Find the rest time
+    srand(time(NULL));
+    double min_rest_time = 0.7 * max_rest_time; // Minimum rest time
+    double rest_time = min_rest_time + ((double)rand() / RAND_MAX) * (max_rest_time - min_rest_time);
+    printf("Visitor %d will stay for %f seconds\n", pid, rest_time);
 
-    sleep(rest_duration);
+    sleep(rest_time);
 
-    // Leave the table
-    leave_table(shm, pid);
+    //Leave table
+    leave_table(pid, shm);
+
+    //Calculate and update visit duration
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    double duration = (end_time.tv_sec - start_time.tv_sec) + 
+                     (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+    
+    sem_wait(&shm->receptionist_mutex);
+    shm->visit_duration += duration;
+    sem_post(&shm->receptionist_mutex);
+}
+
+//Parse the command line arguments
+void parse_arguments(int argc, char* argv[], int* rest_time, key_t* shmkey) {
+    if (argc < 2) {
+        printf("Using default settings: order_time=%d, shmkey=%d\n", *rest_time, *shmkey);
+        return;
+    }
+
+    //Try to read key from file first
+    FILE *key_file = fopen("bar_key.txt", "r");
+    if (key_file) {
+        fscanf(key_file, "%d", shmkey);
+        fclose(key_file);
+    }
+
+    for (int i=1; i<argc; ++i) {
+        if (strcmp(argv[i], "-d") == 0 && (i + 1) < argc) {
+            *rest_time = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-s") == 0 && (i + 1) < argc) {
+            *shmkey = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Invalid argument passing.\n");
+            exit(EXIT_FAILURE);
+        }
+    }
 }
 
 int main(int argc, char* argv[]) {
-    int opt;
-    int rest_time = 15;  // Default rest time increased to 15 seconds
-    key_t shmkey = 1108402178; // Default shared memory key
+    int rest_time = 15;  //Default rest time 
+    key_t shmkey;
 
-    // Parse command line arguments
-    while ((opt = getopt(argc, argv, "d:s:")) != -1) {
-        switch (opt) {
-            case 'd':
-                rest_time = atoi(optarg);
-                break;
-            case 's':
-                shmkey = atoi(optarg);
-                break;
-            default:
-                fprintf(stderr, "Usage: %s [-d rest_time] [-s shmkey]\n", argv[0]);
-                return 1;
-        }
-    }
+    parse_arguments(argc, argv, &rest_time, &shmkey);
 
-    printf("Visitor process starting with rest time: %d seconds\n", rest_time);
+    printf("\nVisitor starting with rest time: %d seconds\n", rest_time);
 
-    // Attach to existing shared memory
-    int shmid = shmget(shmkey, sizeof(BarSharedMemory), 0666);
+    //Attach the shared memory
+
+    //Get shared memory segment
+    int shmid = shmget(shmkey, sizeof(Bar), 0666);
     if (shmid == -1) {
-        perror("Failed to get shared memory");
+        fprintf(stderr, "Get shared memory segment failure!\n");
         return 1;
     }
 
-    BarSharedMemory* shm = (BarSharedMemory*)shmat(shmid, NULL, 0);
-    if (shm == (void*)-1) {
-        perror("Failed to attach shared memory");
-        return 1;
-    }
+    //Attach shared memory
+    Bar* shm = attach_shared_memory(shmid);
 
     pid_t pid = getpid();
-    visit_bar(shm, rest_time, pid);
+    bar_visit(shm, rest_time, pid);
 
-    // Detach shared memory
-    if (shmdt(shm) == -1) {
-        perror("Failed to detach shared memory");
-        return 1;
-    }
+    //Detach the shared memory
+    detach_shared_memory(shm);
 
     return 0;
 }

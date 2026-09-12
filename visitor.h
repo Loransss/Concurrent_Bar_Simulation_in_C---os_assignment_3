@@ -4,19 +4,19 @@
 #include <sys/types.h>
 #include "shared_memory.h"
 
-// Struct to represent a Visitor
-typedef struct {
-    int max_rest_time;  // Maximum rest time for the visitor
-    pid_t pid;          // Process ID of the visitor
-} Visitor;
+//Helper function to find and seat a visitor at a table
+int seat_visitor(Bar* shm, pid_t pid, int start_table);
 
-// Function to find an available chair for the visitor
-void find_available_chair(BarSharedMemory* shm, pid_t pid);
+//Finds an available chair for the visitor
+void find_chair( pid_t pid, Bar* shm) ;
 
-// Function for the visitor to leave the table
-void leave_table(BarSharedMemory* shm, pid_t pid);
+//Parse the command line arguments
+void parse_arguments(int argc, char* argv[], int* rest_time, key_t* shmkey);
 
-// Function that simulates the visitor's bar visit, including resting and leaving
-void visit_bar(BarSharedMemory* shm, int max_rest_time, pid_t pid);
+//Leaves the table
+void leave_table(pid_t pid, Bar* shm);
+
+//Function tha simualtes the bar visit
+void bar_visit(Bar* shm, int max_rest_time, pid_t pid);
 
 #endif // VISITOR_H

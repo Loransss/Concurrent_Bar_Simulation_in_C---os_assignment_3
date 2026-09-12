@@ -4,15 +4,16 @@
 #include <sys/types.h>
 #include "shared_memory.h"
 
-// Struct to represent the Receptionist
-typedef struct {
-    pid_t pid;  // Process ID of the receptionist
-} Receptionist;
-
 // Processes an order for a visitor
-void process_order(BarSharedMemory* shm, pid_t visitor_pid);
+void order(pid_t visitor_pid, Bar* shm);
+
+//Function to update tehe species orders
+void update_orders(Bar* shm, int water, int wine, int cheese, int salad);
+
+// Function to find a visitor that needs service
+pid_t find_visitor(Bar* shm);
 
 // Serves a visitor from the shared memory bar
-void serve_visitor(BarSharedMemory* shm, int max_order_time);
+void serve_visitor(Bar* shm, int max_order_time);
 
 #endif // RECEPTIONIST_H

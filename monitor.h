@@ -4,18 +4,10 @@
 #include <sys/types.h>
 #include "shared_memory.h"
 
-// Struct to represent the Monitor
-typedef struct {
-    pid_t pid;  // Process ID of the monitor
-} Monitor;
+//Fuction that dispalys the bar monitor
+void display_bar(Bar* shm);
 
-// Function to print the status of tables in the bar
-void print_table_status(BarSharedMemory* shm);
-
-// Function to print consumption statistics for drinks and food
-void print_product_stats(BarSharedMemory* shm);
-
-// Function to display the entire bar status
-void display_bar_status(BarSharedMemory* shm);
+//Function to parse the arguments from the programm call
+void parse_arguments(int argc, char* argv[], key_t* shmkey);
 
 #endif // MONITOR_H
